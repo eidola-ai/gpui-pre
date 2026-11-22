@@ -150,6 +150,7 @@ impl WebWindowInner {
             self.register_pointer_up(),
             self.register_pointer_cancel(),
             self.register_touch_end(),
+            self.register_compat_mouse_down(),
             self.register_pointer_move(),
             self.register_pointer_leave(),
             self.register_wheel(),
@@ -469,9 +470,22 @@ impl WebWindowInner {
     /// Cancels touch default handling separately because iOS does not consistently
     /// transfer pointer-event cancellation to the corresponding touch event.
     /// During native scrolling, touchend may be non-cancelable.
+    /// An uncancelled touchend makes iOS emit compatibility mouse events,
+    /// whose mousedown would move focus to the canvas and off the mirror.
+    /// Pointer input is handled by the pointer listeners, so drop it.
+    fn register_compat_mouse_down(self: &Rc<Self>) -> EventListenerHandle {
+        self.listen_non_passive("mousedown", move |event: JsValue| {
+            let event: web_sys::Event = event.unchecked_into();
+            event.prevent_default();
+        })
+    }
+
     fn register_touch_end(self: &Rc<Self>) -> EventListenerHandle {
         self.listen_non_passive("touchend", move |event: JsValue| {
             let event: web_sys::Event = event.unchecked_into();
+            if KEYBOARD_GESTURE.with(|flag| flag.replace(false)) {
+                return;
+            }
             if event.cancelable() {
                 event.prevent_default();
             }
@@ -498,6 +512,9 @@ impl WebWindowInner {
         if !self.touch_input {
             return;
         }
+        // WebKit on iOS drops the keyboard if this gesture's touchend is
+        // cancelled; let that one through.
+        KEYBOARD_GESTURE.with(|flag| flag.set(true));
         let was_enabled = self.ime_mirror.virtual_keyboard_enabled();
         self.ime_mirror.set_virtual_keyboard_enabled(true);
         // Trigger a focus event only when the keyboard actually needs
@@ -1478,4 +1495,9 @@ mod tests {
         assert_ne!(reused, first);
         assert_ne!(reused, concurrent);
     }
+}
+
+thread_local! {
+    /// Set when a tap's pointerup summoned the keyboard; read by its touchend.
+    static KEYBOARD_GESTURE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
